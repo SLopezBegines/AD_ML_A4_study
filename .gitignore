@@ -1,0 +1,11 @@
+.Rhistory
+.RData
+.Rproj.user/
+.Ruserdata
+*.Rproj
+*.csv
+*.xlsx
+*.sav
+# Ignorar carpetas con datos de entrada y salida
+input_data/
+output/

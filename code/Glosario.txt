@@ -1,0 +1,56 @@
+Identificación y temporalidad
+id_paciente: identificador único de cada paciente. Cada paciente puede tener múltiples visitas (registro longitudinal).
+
+visita: número secuencial de la visita (1, 2, …). Indica el orden cronológico de seguimiento.
+
+tiempo_evol: tiempo desde el diagnóstico en meses. Representa la evolución clínica desde el inicio del seguimiento.
+
+Datos demográficos
+edad: edad del paciente en años en cada visita. Puede cambiar levemente con el tiempo en visitas posteriores.
+
+sexo: sexo biológico del paciente ("Hombre" o "Mujer").
+
+Genética
+apoe: genotipo del alelo APOE, principal factor de riesgo genético para Alzheimer. El alelo E4 se asocia con mayor riesgo.
+
+snp_rs123, snp_rs456: polimorfismos nucleotídicos simples (SNPs) ficticios. Útiles para modelar riesgo poligénico o asociaciones exploratorias.
+
+Biomarcadores neurodegenerativos (en LCR)
+abeta42: nivel de β-amiloide 42 en líquido cefalorraquídeo (pg/mL). Niveles bajos indican mayor acumulación cerebral, típico de Alzheimer.
+
+tau: nivel total de proteína tau en LCR (pg/mL). Niveles elevados reflejan daño axonal y neurodegeneración.
+
+Variables clínicas / bioquímicas
+presion_sistolica: presión arterial sistólica (mmHg). Elevada puede contribuir a deterioro cognitivo vascular.
+
+colesterol: nivel de colesterol total en sangre (mg/dL). Implicado en metabolismo cerebral.
+
+glucosa: nivel de glucosa en sangre (mg/dL). Se evalúa por relación con comorbilidad diabética o síndrome metabólico.
+
+lactato: concentración de lactato (mmol/L). Puede reflejar metabolismo anaeróbico o estrés metabólico.
+
+cetonas: cuerpos cetónicos en sangre (mmol/L). Relacionados con metabolismo energético alternativo.
+
+creatinina: función renal (mg/dL). Elevación puede indicar daño renal.
+
+gpt: enzima hepática ALT (GPT) en sangre (UI/L). Alteraciones pueden estar asociadas a toxicidad o comorbilidades.
+
+pcr: proteína C-reactiva (mg/L). Marcador de inflamación sistémica; puede estar elevado en procesos neuroinflamatorios.
+
+Estilo de vida
+fuma: hábito tabáquico ("Sí", "No"). Factor de riesgo vascular y neurológico.
+
+actividad_fisica: nivel de actividad física reportado ("Baja", "Media", "Alta"). Relacionado con neuroprotección.
+
+Observaciones clínicas
+comentarios: anotaciones libres del médico. Pueden contener frases positivas, neutras o negativas sobre evolución, síntomas o estado general del paciente. Útil para análisis de sentimientos con LLM o NLP.
+
+Variable objetivo
+estado_clinico: categorización clínica de la gravedad del deterioro cognitivo:
+
+Leve: síntomas incipientes, autonomía conservada.
+
+Moderado: síntomas evidentes, pérdida de independencia parcial.
+
+Grave: dependencia significativa, síntomas avanzados.
+

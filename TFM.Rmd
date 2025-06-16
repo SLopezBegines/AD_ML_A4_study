@@ -1,0 +1,613 @@
+---
+title: "TFM_AD"
+output: html_document
+date: "2025-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0. Import Libaries
+
+```{r}
+rm(list=ls())
+gc()
+source("./code/00.libraries.R")
+source("./code/01.functions.R")
+
+# Global Variables
+output_path <- "output/"
+image_number <- 1  # Initialize image counter for saving figures
+# Create output directory if it doesn't exist
+create_directories(output_path)
+
+```
+
+
+# 1. Introduction
+
+# 2. Goals
+
+# 3. M&M
+For databases, we will start with two different datasetsÑ
+
+- Syntetic databases with a plethora of variables commonly checked in AD
+- Real MRI images downloaded from Kaggle (https://www.kaggle.com/datasets/abdullahtauseef2003/adni-4c-alzheimers-mri-classification-dataset/data) with 
+
+- A4 Dataset
+Anti-Amyloid Treatment in Asymptomatic Alzheimer's Disease
+https://doi.org/10.1001/jamaneurol.2020.0387
+
+https://discover.a4studydata.org/catalogue/studies/1901af97-b7cf-46ef-ab5c-b43212902b72
+
+We will use A4 dataset with to perspectives:
+- First, use tabular data to obtain a probability of AD in patients
+- Second, use PET images to get the probability (or score) of Tau or B-amiloid deposits.
+- Third, and most importatn, mix both CNN in a single one to obtain the mixed probability bases in tabular and images data.
+
+First aim will be done in R, with EDA, remove outliers, impute missing values, and select variables. For ML based in tabular data, I will use R (tidymodels/H2O) and/or Python.
+Second and third aim will be done in Pyton.
+
+## 3.1. Loading tabular data
+The database to be used comes from the A4 study. The data includes various clinical, demographic, and imaging variables.
+
+### Screening
+
+```{r}
+## Sankey plot
+# Create a data frame for the flows
+flow_data <- data.frame(
+  Visit1  = c("Screened", "Screened", "Screened"),
+  Visit2  = c("Excluded", "Continued", "Continued"),
+  Amyloid = c("Screen Failed",        "AB-",      "AB+"),
+  Study   = c("Screen Failed",        "LEARN",    "A4"),
+  n       = c(2277,      3163,       1323)
+)
+
+# Set desired top-to-bottom order
+flow_data$Amyloid <- factor(as.character(flow_data$Amyloid), levels = c("AB+", "AB-", "Screen Failed"))
+flow_data$Study   <- factor(as.character(flow_data$Study),   levels = c("A4", "LEARN", "Screen Failed"))
+
+# Replace NA labels with something readable
+flow_data$Amyloid <- fct_explicit_na(flow_data$Amyloid, na_level = "—")
+flow_data$Study   <- fct_explicit_na(flow_data$Study,   na_level = "—")
+
+# Plot
+p <- ggplot(flow_data,
+       aes(axis1 = Visit1, axis2 = Visit2, axis3 = Amyloid, axis4 = Study, y = n)) +
+  scale_x_discrete(limits = c("Visit 1", "Visit 2", "Amyloid", "Study"), expand = c(.1, .05)) +
+  geom_alluvium(aes(fill = Study), width = 1/12, alpha = 0.8) +
+  geom_stratum(width = 1/12, fill = "grey90", color = "black") +
+  geom_text(stat = "stratum",
+            aes(label = paste0(after_stat(stratum), "\n(n=", after_stat(count), ")")),
+            size = 3.5) +
+  theme_minimal(base_size = 14) +
+  theme(axis.title = element_blank(),
+        panel.grid = element_blank()) +
+  labs(title = "Participant Flow in A4/LEARN Screening")
+
+print(p)
+save_plot("participant_flow_sankey", p, height = 6)
+rm(flow_data)
+```
+
+### Load CSV
+
+```{r}
+# Load all csv files in the directory Derived data
+
+# List CSV file paths and names
+file_paths <- list.files(path = "input_data/A4/Derived Data", pattern = "\\.csv$", full.names = TRUE)
+file_names <- basename(file_paths) %>% str_remove("\\.csv$")
+
+# Create an environment to store log
+removal_log <- list()
+
+# Function to read, convert chars to factors, remove 1-level factors, and log removals
+read_and_clean <- function(file, name) {
+  df <- read_csv(file, show_col_types = FALSE) %>%
+    mutate(across(where(is.character), as.factor))
+  
+  # Identify factor columns with only one level
+  one_level_cols <- names(df)[sapply(df, function(col) is.factor(col) && nlevels(col) == 1)]
+  # Identify columns with zero SD (constant columns)
+  zero_sd_cols <- names(df)[sapply(df, function(col) is.numeric(col) && sd(col, na.rm = TRUE) == 0)]
+  # Combine both sets of columns to remove
+  one_level_cols <- unique(c(one_level_cols, zero_sd_cols))
+  # Log if any were found
+  if (length(one_level_cols) > 0) {
+    removal_log[[name]] <<- one_level_cols
+  }
+  
+  # Remove those columns
+  df %>% select(!all_of(one_level_cols))
+}
+
+# Read and clean all, storing in a named list
+Derived_Data <- map2(file_paths, file_names, ~ read_and_clean(.x, .y)) %>%
+  set_names(file_names)
+
+# Show log with character columns removed, those with only one factor level
+removal_log
+
+save(Derived_Data, file = paste0(output_path, "RData/","Derived_Data.RData"))
+
+# Summarize structure into a tidy format
+structure_summary <- map_dfr(Derived_Data, ~ tibble(
+  column = names(.x),
+  class   = sapply(.x, class),
+  n_levels = sapply(.x, function(col) if (is.factor(col)) nlevels(col) else NA),
+  n_missing = sapply(.x, function(col) sum(is.na(col))),
+  n_unique = sapply(.x, function(col) if (is.factor(col)) n_distinct(col) else length(unique(col))),
+  n_rows = nrow(.x)
+  ), .id = "source_file")
+# Save the structure summary
+write_csv(structure_summary, paste0(output_path, "tables/","structure_summary.csv"))
+# Clean environment
+rm(file_paths, file_names, removal_log)
+
+```
+#### Split ADQS df
+
+```{r}
+#Select test for every visit
+test_QS <- Derived_Data$ADQS %>%
+  select( SUBSTUDY, BID, VISITCD, VISIT, AVISIT, EPOCH, QSSEQ, QSTESTCD, QSTEST, QSVERSION, QSLANG, QSSTRESN, QSBLRES, QSCHANGE, QSBLSD)
+
+#Save test data
+write_csv(test_QS, paste0(output_path, "tables/","test_qs_data.csv"))
+
+# Remove test variables form ADQS
+Derived_Data$ADQS <- Derived_Data$ADQS %>%
+  select(-c(QSSEQ, QSTESTCD, QSTEST, QSVERSION, QSLANG, QSSTRESN, QSBLRES, QSCHANGE, QSBLSD))
+
+# Remove duplicates in ADQS
+Derived_Data$ADQS <- Derived_Data$ADQS %>%
+  distinct(BID, SUBSTUDY, VISITCD, VISIT, AVISIT, EPOCH, .keep_all = TRUE)
+```
+
+
+### Glosary of the data
+
+```{r}
+# Load glosary of data
+glosary <- read_csv("input_data/A4/Documents/Data Dictionaries/derived_datadic.csv", show_col_types = FALSE)
+
+# Clean glosary: remove empty rows and unnecessary columns
+glosary <- glosary %>%
+  select(FIELD_NAME, FIELD_FORMAT, FIELD_DESC, FIELD_CODE) %>% 
+  #Remove duplicates
+  distinct()
+
+
+# Join FIELD_FORMAT, FIELD_DESC, FIELD_CODE with structure_summary
+structure_summary <- structure_summary %>%
+  left_join(glosary, by = c("column" = "FIELD_NAME")) %>%
+  select(source_file, column, class, n_levels, n_missing, n_unique, n_rows, FIELD_FORMAT, FIELD_DESC, FIELD_CODE)
+
+# Save the structure summary
+write_csv(structure_summary, paste0(output_path, "tables/","structure_summary.csv"))
+rm(glosary)
+```
+
+## Select longitudinal and cross-sectional data
+Longitudinal data is defined as data that has multiple measurements for the same subject over time, while cross-sectional data is a snapshot of a single point in time.
+Longitudinal data will change over time (VISIT, AVISIT, BID), while cross-sectional data will not change over time.
+```{r}
+# Función para identificar variables constantes y longitudinales por paciente
+get_variable_type <- function(df) {
+  # Nos aseguramos que la columna BID exista
+  if (!"BID" %in% colnames(df)) return(NULL)
+  
+  # Eliminamos columnas vacías o todas NA
+  df <- df %>% select(where(~ !all(is.na(.))))
+
+  # Excluimos columnas no informativas
+  exclude_cols <- c("BID", "SUBSTUDY")
+  test_vars <- setdiff(colnames(df), exclude_cols)
+
+  # Para cada variable, comprobamos si tiene solo un valor único por BID
+  var_type <- map_dfr(test_vars, function(var) {
+    tmp <- df %>%
+      group_by(BID) %>%
+      summarise(n_unique = n_distinct(.data[[var]], na.rm = TRUE), .groups = "drop") %>%
+      summarise(max_unique = max(n_unique, na.rm = TRUE)) %>%
+      mutate(variable = var,
+             type = ifelse(max_unique == 1, "constant", "longitudinal"))
+  })
+
+  return(var_type)
+}
+
+# Aplicar la función a cada dataframe
+variable_types <- map(Derived_Data, get_variable_type)
+
+
+# Crear una lista con tipo constante o longitudinal y nombre del df
+var_summary <- map2_dfr(
+  variable_types,
+  names(variable_types),
+  ~ mutate(.x, dataset = .y)
+)
+
+var_summary <- var_summary %>%
+  select(dataset, type, variable) %>%
+  arrange(dataset,variable, )
+
+# Save variable types
+write_csv(var_summary, paste0(output_path, "tables/","variable_types.csv"))
+save(variable_types, file = paste0(output_path, "RData/","variable_types.RData"))
+```
+
+### Cross-sectional data
+
+```{r}
+cross_sectional_df_list <- map2(Derived_Data, variable_types, function(df, types) {
+  if (is.null(types)) return(NULL)
+  constant_vars <- filter(types, type == "constant")$variable
+  vars_to_select <- c("BID", "SUBSTUDY", constant_vars)
+  df %>% 
+    select(any_of(vars_to_select)) %>%
+    distinct(BID, .keep_all = TRUE)
+})
+
+# 1. Filtrar sólo los data.frames válidos
+cross_sectional_df_list_clean <- cross_sectional_df_list %>%
+  discard(~ is.null(.x) || !is.data.frame(.x))
+
+# 2. Asegurar que BID es carácter en todos los dataframes
+cross_sectional_df_list_clean <- map(cross_sectional_df_list_clean, function(df) {
+  df %>% mutate(BID = as.character(BID))
+  
+})
+
+# 3. Hacer el merge seguro
+cross_sectional_merged <- reduce(cross_sectional_df_list_clean, full_join, by = "BID")
+
+# 2. Resolver columnas duplicadas: AGE.x, AGE.y, etc.
+# Paso automático: identificar columnas con el mismo prefijo
+consolidate_columns <- function(df) {
+  base_names <- names(df)
+  # Extraer columnas duplicadas por sufijos .x, .y, etc.
+  name_stems <- gsub("\\..*$", "", base_names)
+  duplicated_names <- name_stems[duplicated(name_stems)]
+  unique_dups <- unique(duplicated_names)
+
+  for (stem in unique_dups) {
+    cols <- base_names[startsWith(base_names, paste0(stem, "."))]
+    if (length(cols) > 0 && stem %in% names(df)) {
+      cols <- c(stem, cols)  # incluir la original
+    } else {
+      cols <- base_names[name_stems == stem]
+    }
+
+    # Crear nueva columna coalescida
+    df[[stem]] <- df %>%
+      select(any_of(cols)) %>%
+      purrr::pmap_chr(~ coalesce(!!!list(...)) %>% as.character())
+
+    # Eliminar columnas duplicadas
+    df <- df %>% select(-any_of(setdiff(cols, stem)))
+  }
+  return(df)
+}
+
+# 3. Aplicar consolidación
+cross_sectional_df <- consolidate_columns(cross_sectional_merged)
+# Remove previous BID from cross sectional data
+previous_bid_c <- cross_sectional_df %>% 
+  select(BID, PREVBID) %>%
+  distinct()
+
+# Remove previous BID from cross sectional data
+cross_sectional_df <- cross_sectional_df %>%
+  select(-PREVBID)
+# Save cross-sectional data
+write_csv(cross_sectional_df, paste0(output_path, "tables/","cross_sectional_data.csv"))
+# Clean enviroment
+rm(cross_sectional_df_list, cross_sectional_df_list_clean, cross_sectional_merged)
+```
+
+### Longitudinal data
+```{r}
+
+get_clean_longitudinal <- function(df_name, data_list, type_list) {
+  if (df_name == "DS") return(NULL)  # omitir DS
+
+  df <- data_list[[df_name]]
+  types <- type_list[[df_name]]
+  if (is.null(df) || is.null(types)) return(NULL)
+
+  # Extraer variables longitudinales
+  long_vars <- types %>%
+    filter(type == "longitudinal") %>%
+    pull(variable)
+
+  # Variables de visita a retener si existen
+  visit_vars <- c("VISIT", "VISITCD", "VISCODE", "AVISIT")
+
+  df %>%
+    select(any_of(c("BID", "SUBSTUDY", visit_vars, long_vars))) %>%
+    mutate(across(everything(), ~ as.character(.)))
+}
+
+df_names <- setdiff(names(Derived_Data), "DS")  # omitir DS explícitamente
+
+longitudinal_df_list <- map(df_names, get_clean_longitudinal, data_list = Derived_Data, type_list = variable_types) %>%
+  compact()
+
+longitudinal_df <- bind_rows(longitudinal_df_list)
+
+
+
+# Obtener nombres de columnas base que tienen .z o .ch
+all_cols <- colnames(longitudinal_df)
+
+base_vars <- unique(gsub("\\.(z|ch)$", "", all_cols[grepl("\\.(z|ch)$", all_cols)]))
+# Crear una copia para trabajar
+longitudinal_df_clean <- longitudinal_df
+
+for (base in base_vars) {
+  col_z <- paste0(base, ".z")
+  col_ch <- paste0(base, ".ch")
+  col_base <- base
+  
+  # Crear columna consolidada si existe al menos una
+  if (any(c(col_z, col_ch, col_base) %in% names(longitudinal_df_clean))) {
+    new_col <- paste0(base, "_merged")
+    
+    longitudinal_df_clean[[new_col]] <- coalesce(
+      longitudinal_df_clean[[col_z]],
+      longitudinal_df_clean[[col_ch]],
+      longitudinal_df_clean[[col_base]]
+    )
+  }
+}
+
+cols_to_remove <- unlist(lapply(base_vars, function(x) c(x, paste0(x, ".ch"), paste0(x, ".z"))))
+cols_to_remove <- intersect(cols_to_remove, colnames(longitudinal_df_clean))
+
+longitudinal_df <- longitudinal_df_clean %>% select(-all_of(cols_to_remove))
+
+
+# Save longitudinal data
+write_csv(longitudinal_df, paste0(output_path, "tables/","longitudinal_data.csv"))
+# Clean environment
+rm(df_names, longitudinal_df_list, longitudinal_df_clean, base_vars, all_cols, cols_to_remove)
+```
+### Remove previous patient ID
+
+
+
+
+## Combine datasets in a single object
+
+```{r}
+
+# Combine cross-sectional and longitudinal data into a list
+A4_data <- list(
+  cross_sectional = cross_sectional_df,
+  longitudinal = longitudinal_df,
+  test_QS = test_QS,
+  previous_bid = previous_bid_c
+)
+#source("./code/01.functions.R") 
+A4_data$cross_sectional <- apply_column_classes(A4_data$cross_sectional, structure_summary)
+A4_data$longitudinal_df <- apply_column_classes(A4_data$longitudinal, structure_summary)
+A4_data$test_QS <- apply_column_classes(A4_data$test_QS, structure_summary)
+
+#Save A4_data
+save(A4_data, file = paste0(output_path, "RData/","A4_data.RData"))
+rm(cross_sectional_df, longitudinal_df, test_QS, previous_bid_c)
+```
+
+## Load combined data
+
+```{r}
+load(paste0(output_path, "RData/","A4_data.RData"))
+```
+
+# Variables conversion to factors
+## Cross-sectional data
+```{r}
+# Convert character columns to factors in cross-sectional data
+A4_data$cross_sectional <- A4_data$cross_sectional %>%
+  mutate(
+    BID = as.character(BID),
+    AGECAT = factor(case_when(
+      AGEYR < 65 ~ "Age < 65",
+      AGEYR >= 65 &
+        AGEYR < 75 ~ "65 <= Age < 75",
+      AGEYR >= 75 & AGEYR < 85 ~ "75 <= Age < 85",
+      AGEYR >= 85 ~ "Age >= 85"
+    )),
+    SEX = factor(
+      case_when(SEX == 1 ~ "Female", SEX == 2 ~ "Male"),
+      levels = c("Male", "Female")
+    ),
+    RACE = factor(case_when(
+      RACE == 1 ~ "White",
+      RACE == 2 ~ "Black or African American",
+      RACE == 58 ~ "Asian",
+      RACE == 79 ~ "Native Hawaiian or Other Pacific Islander",
+      RACE == 84 ~ "American Indian or Alaskan Native",
+      RACE == 97 ~ "Unknown or Not Reported",
+      RACE == 100 ~ "More than one race"
+    )),
+    MARITAL = factor(case_when(
+      MARITAL == 2 ~ "Divorced",
+      MARITAL == 4 ~ "Never married",
+      MARITAL == 5 ~ "Widowed",
+      MARITAL == 11 ~ "Married",
+      MARITAL == 97 ~ "Unknown or Not Reported"
+    )),
+    ETHNIC = factor(case_when(
+      ETHNIC == 50 ~ "Hispanic or Latino",
+      ETHNIC == 56 ~ "Not Hispanic or Latino",
+      ETHNIC == 97 ~ "Unknown or Not reported"
+    )),
+    ALCHLBL = factor(case_when(ALCHLBL == 0 ~ "No", ALCHLBL == 1 ~ "Yes")),
+    CFBL = factor(case_when(CFBL == 0 ~ "No", CFBL == 1 ~ "Yes")),
+    TBBL = factor(case_when(TBBL == 0 ~ "No", TBBL == 1 ~ "Yes")),
+    WRKRET = factor(case_when(WRKRET == 1 ~ "Yes", WRKRET == 0 ~ "No", WRKRET == 96 ~ "Not Applicable")),
+    APOEGNPRSNFLG = factor(case_when(APOEGNPRSNFLG == 1 ~ "Yes", APOEGNPRSNFLG == 0 ~ "No")),
+    AGEYR = as.numeric(AGEYR),
+    SUVRCER = as.numeric(SUVRCER),
+    AMYLCENT = as.numeric(AMYLCENT),
+    EDCCNTU = as.numeric(EDCCNTU),
+    COGDSSTTSV6 = as.numeric(COGDSSTTSV6),
+    COGLMDRTSV6 = as.numeric(COGLMDRTSV6),
+    TX = factor(TX, levels = c("Placebo", "Solanezumab")),
+    COMPLETER_label = factor(case_when(SUBJCOMPTR == 1 ~ "Completer", TRUE ~ "Dropout"))
+  )
+
+
+#Save A4_data
+save(A4_data, file = paste0(output_path, "RData/","A4_data.RData"))
+
+```
+
+
+# 4. Results
+
+## 4.1. EDA
+
+```{r}
+#Resumen de datos
+skimr::skim(A4_data$cross_sectional)
+```
+
+
+```{r}
+funModeling::status(A4_data$cross_sectional)
+```
+
+
+```{r}
+funModeling::profiling_num(A4_data$cross_sectional)
+```
+
+```{r}
+# Plot numeric variables distribution
+plot_num <- function(data, vars = NULL, ncol = 4,
+                     title = "Numeric Variables Distribution",
+                     theme = theme_minimal()) {
+  
+  # Si no se especifican, usar todas las numéricas
+  if (is.null(vars)) {
+    vars <- data %>% select(where(is.numeric)) %>% colnames()
+  }
+  
+  # Pivotar a formato largo
+  df_long <- data %>%
+    select(any_of(vars)) %>%
+    pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+    filter(!is.na(value))
+
+  # Gráfico
+  p <- ggplot(df_long, aes(x = value)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "skyblue", color = "black", alpha = 0.6) +
+    geom_density(color = "red", linewidth = 0.1, adjust = 1.2) +
+    facet_wrap(~variable, scales = "free", ncol = ncol) +
+    labs(title = title, x = NULL, y = "Density") +
+    theme
+
+  print(p)
+  save_plot("Numeric_variables_distribution", p, height = 20, width = 16)
+}
+
+
+numeric_var <- A4_data$cross_sectional %>%
+  select(where(is.numeric)) %>%
+  colnames()
+
+plot_num(A4_data$cross_sectional, vars = numeric_var)
+         
+```
+
+
+```{r}
+
+
+plot_cat <- function(data, vars = NULL, ncol = 2,
+                     title = "Categorical Variables Distribution",
+                     theme = theme_minimal()) {
+  
+  # Si no se especifican, usar todas las categóricas
+  if (is.null(vars)) {
+    vars <- data %>%
+      select(where(~ is.character(.) || is.factor(.))) %>%
+      colnames()
+  }
+  
+  # Formato largo
+  df_long <- data %>%
+    select(any_of(vars)) %>%
+    pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+    filter(!is.na(value)) %>%
+    mutate(value = as.factor(value))
+
+  # Plot
+  p <- ggplot(df_long, aes(x = value)) +
+    geom_bar(fill = "steelblue", color = "black", alpha = 0.7) +
+    facet_wrap(~variable, scales = "free", ncol = ncol) +
+    labs(title = title, x = NULL, y = "Count") +
+    theme +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  print(p)
+  
+  save_plot("Categorical_variables_distribution", p, height = 20, width = 16)
+}
+
+categorical_vars <- A4_data$cross_sectional %>%
+  select(where(~ is.factor(.))) %>%
+  colnames()
+
+plot_cat(A4_data$cross_sectional, vars = categorical_vars)
+
+```
+```{r}
+
+for (i in categorical_vars) {
+  plotar(A4_data$cross_sectional, input= numeric_var, target= i, plot_type = "boxplot", path_out = paste0(output_path, "figures/"))
+}
+
+```
+
+##### Remove LEARN and SF Data #####################################
+
+
+## 4.1. Database generation
+
+### 4.1.1. Preprocessing
+
+
+
+
+
+### 4.1.2. EDA
+
+### 4.1.2. Tidymodels
+
+## 4.2. Images databases
+
+### 4.2.1. Image classification
+
+### 4.2.2. Data Augmentation
+
+### 4.2.3. ML in Python
+
+
+## 4.2. ML integration
+
+# 5. Discussion
+
+# 6. Bibliography
+
+# 7. sessionInfo
+```{r}
+sessionInfo()
+```
+
