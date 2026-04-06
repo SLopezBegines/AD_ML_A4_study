@@ -13,3 +13,4 @@ We will use A4 dataset with to perspectives:
 
 First aim will be done in R, with EDA, remove outliers, impute missing values, and select variables. For ML based in tabular data, I will use R (tidymodels/H2O) and/or Python.
 Second and third aim will be done in Pyton.
+> **Note:** This repository contains legacy code from 2018-2020. For current projects and consulting services, visit [slopezbegines.github.io](https://slopezbegines.github.io)
